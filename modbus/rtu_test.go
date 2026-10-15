@@ -199,6 +199,143 @@ func TestRTU_OtherUnit(t *testing.T) {
 	}
 }
 
+// A request ends at the earlier of its ctx's deadline and WithTimeout's, and one whose ctx is done already is never
+// sent.
+func TestRTUTransport_Deadline(t *testing.T) {
+	t.Parallel()
+
+	for name, newPorts := range ports() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				client, server := newPorts()
+				serveRTU(t, server, newMemory())
+				c := modbus.NewClient(modbus.NewRTUTransport(client, baudRate, modbus.WithTimeout(100*time.Millisecond)))
+
+				for _, tt := range []struct{ ctx, want time.Duration }{
+					{ctx: 30 * time.Millisecond, want: 30 * time.Millisecond},
+					{ctx: 200 * time.Millisecond, want: 100 * time.Millisecond},
+				} {
+					ctx, cancel := context.WithTimeout(t.Context(), tt.ctx)
+					start := time.Now()
+					// Unit 2 never answers.
+					if _, err := c.ReadRegisters(ctx, 2, modbus.HoldingRegisters, 0, 1); !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("ctx of %v: got %v, want context.DeadlineExceeded", tt.ctx, err)
+					}
+					if waited := time.Since(start); waited != tt.want {
+						t.Errorf("ctx of %v: waited %v, want %v", tt.ctx, waited, tt.want)
+					}
+					cancel()
+				}
+
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				if err := c.WriteRegister(ctx, 1, 0, 42); !errors.Is(err, context.Canceled) {
+					t.Errorf("done ctx: got %v, want context.Canceled", err)
+				}
+				got, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 0, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got[0] != 0 {
+					t.Errorf("register 0 = %d, want 0: the write with a done ctx was sent", got[0])
+				}
+			})
+		})
+	}
+}
+
+// A request waiting for another in flight ends with its own ctx: at its deadline, or once canceled.
+func TestRTUTransport_Queue(t *testing.T) {
+	t.Parallel()
+
+	for name, newPorts := range ports() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				client, server := newPorts()
+				serveRTU(t, server, newMemory())
+				c := modbus.NewClient(modbus.NewRTUTransport(client, baudRate, modbus.WithTimeout(100*time.Millisecond)))
+
+				// Unit 2 never answers, so this request holds the line for WithTimeout's 100ms.
+				first := make(chan error, 1)
+				go func() {
+					_, err := c.ReadRegisters(t.Context(), 2, modbus.HoldingRegisters, 0, 1)
+					first <- err
+				}()
+				synctest.Wait()
+
+				start := time.Now()
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+				defer cancel()
+				if _, err := c.ReadRegisters(ctx, 1, modbus.HoldingRegisters, 0, 1); !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("deadline: got %v, want context.DeadlineExceeded", err)
+				}
+				ctx, cancel = context.WithCancel(t.Context())
+				time.AfterFunc(20*time.Millisecond, cancel)
+				if _, err := c.ReadRegisters(ctx, 1, modbus.HoldingRegisters, 0, 1); !errors.Is(err, context.Canceled) {
+					t.Errorf("cancel: got %v, want context.Canceled", err)
+				}
+				if waited := time.Since(start); waited != 50*time.Millisecond {
+					t.Errorf("waited %v, want 30ms, then 20ms", waited)
+				}
+
+				if err := <-first; !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("request in flight: got %v, want context.DeadlineExceeded", err)
+				}
+				if _, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 0, 1); err != nil {
+					t.Errorf("after: %v", err)
+				}
+			})
+		})
+	}
+}
+
+// stuck is a port without deadlines whose Write blocks until release is closed, as a serial port's may while a slow
+// line carries a long frame: a request in flight on it outlives its ctx.
+type stuck struct{ release chan struct{} }
+
+func (s stuck) Read([]byte) (int, error) { return 0, nil }
+
+func (s stuck) Write(p []byte) (int, error) {
+	<-s.release
+
+	return len(p), nil
+}
+
+// A request waiting behind one that outlives its ctx ends at its own WithTimeout, even with a ctx without deadline.
+func TestRTUTransport_QueueTimeout(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		port := stuck{release: make(chan struct{})}
+		c := modbus.NewClient(modbus.NewRTUTransport(port, baudRate, modbus.WithTimeout(100*time.Millisecond)))
+
+		first := make(chan error, 1)
+		go func() {
+			_, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 0, 1)
+			first <- err
+		}()
+		synctest.Wait()
+
+		time.Sleep(50 * time.Millisecond)
+		start := time.Now()
+		if _, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 0, 1); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("waiting: got %v, want context.DeadlineExceeded", err)
+		}
+		if waited := time.Since(start); waited != 100*time.Millisecond {
+			t.Errorf("waited %v, want WithTimeout's 100ms", waited)
+		}
+
+		close(port.release)
+		if err := <-first; !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("request in flight: got %v, want context.DeadlineExceeded", err)
+		}
+	})
+}
+
 // A broadcast write reaches the device, which does not answer, and a broadcast read is refused.
 func TestRTU_Broadcast(t *testing.T) {
 	t.Parallel()

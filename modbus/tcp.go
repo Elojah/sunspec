@@ -69,7 +69,6 @@ func readFrame(r io.Reader) (mbapFrame, error) {
 type TCPTransport struct {
 	address string
 	config  config
-	dialer  net.Dialer
 
 	// sem holds a token while a request is in flight. Waiting for it selects on ctx, which a mutex cannot.
 	sem chan struct{}
@@ -99,21 +98,17 @@ func NewTCPTransport(address string, options ...Option) *TCPTransport {
 // response may still come, or half of it, and a new connection is the only sure way not to read it as the next
 // request's response. The transaction ID would tell them apart, but not a response cut in the middle.
 func (t *TCPTransport) Send(ctx context.Context, unit uint8, request PDU) (PDU, error) {
-	ctx, cancel := t.config.requestContext(ctx)
-	defer cancel()
-
-	select {
-	case t.sem <- struct{}{}:
-	case <-ctx.Done():
-		return PDU{}, ctx.Err()
+	b := newBound(ctx, t.config.timeout)
+	if err := acquire(t.sem, b); err != nil {
+		return PDU{}, err
 	}
 	defer func() { <-t.sem }()
 
-	conn, err := t.connect(ctx)
+	conn, err := t.connect(b)
 	if err != nil {
 		return PDU{}, err
 	}
-	response, err := t.roundTrip(ctx, conn, unit, request)
+	response, err := t.roundTrip(b, conn, unit, request)
 	if err != nil {
 		t.drop(conn)
 
@@ -143,7 +138,7 @@ func (t *TCPTransport) Close() error {
 }
 
 // connect returns the connection, dialing it if there is none.
-func (t *TCPTransport) connect(ctx context.Context) (net.Conn, error) {
+func (t *TCPTransport) connect(b bound) (net.Conn, error) {
 	t.mu.Lock()
 	conn, closed := t.conn, t.closed
 	t.mu.Unlock()
@@ -155,7 +150,8 @@ func (t *TCPTransport) connect(ctx context.Context) (net.Conn, error) {
 	}
 
 	// Outside the lock, so that Close never waits for a dial.
-	conn, err := t.dialer.DialContext(ctx, "tcp", t.address)
+	dialer := net.Dialer{Deadline: b.deadline}
+	conn, err := dialer.DialContext(b.ctx, "tcp", t.address)
 	if err != nil {
 		return nil, err
 	}
@@ -184,18 +180,18 @@ func (t *TCPTransport) drop(conn net.Conn) {
 }
 
 // roundTrip writes request and reads its response on conn.
-func (t *TCPTransport) roundTrip(ctx context.Context, conn net.Conn, unit uint8, request PDU) (PDU, error) {
-	stop := watch(ctx, conn)
+func (t *TCPTransport) roundTrip(b bound, conn net.Conn, unit uint8, request PDU) (PDU, error) {
+	stop := watch(b, conn)
 	defer stop()
 
 	t.id++
 	frame := appendFrame(make([]byte, 0, mbapHeaderLen+1+len(request.Data)), mbapFrame{id: t.id, unit: unit, pdu: request})
 	if _, err := conn.Write(frame); err != nil {
-		return PDU{}, ioError(ctx, err)
+		return PDU{}, ioError(b, err)
 	}
 	response, err := readFrame(conn)
 	if err != nil {
-		return PDU{}, ioError(ctx, err)
+		return PDU{}, ioError(b, err)
 	}
 	if response.id != t.id || response.unit != unit {
 		return PDU{}, invalidResponse(request.Function, "transaction %d for unit %d, want %d for unit %d", response.id, response.unit, t.id, unit)

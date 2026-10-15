@@ -104,18 +104,18 @@ func newLine(port io.ReadWriter, baudRate int) *line {
 
 // write waits until the line has been silent for t3.5, since a device takes a frame starting earlier as part of the
 // last one, then writes frame.
-func (l *line) write(ctx context.Context, frame []byte) error {
+func (l *line) write(b bound, frame []byte) error {
 	if wait := time.Until(l.idleAt.Add(l.silence)); wait > 0 {
-		if err := sleep(ctx, wait); err != nil {
+		if err := sleep(b, wait); err != nil {
 			return err
 		}
 	}
 	if l.deadlines != nil {
-		stop := watch(ctx, l.deadlines)
+		stop := watch(b, l.deadlines)
 		defer stop()
 	}
 	if _, err := l.port.Write(frame); err != nil {
-		return ioError(ctx, err)
+		return ioError(b, err)
 	}
 	// Write returns once the frame is in the port's buffer, before its last character has left: 8 bytes take 9 ms
 	// more at 9600 baud.
@@ -132,13 +132,13 @@ func (l *line) busyUntil(t time.Time) {
 	}
 }
 
-// readFull reads len(p) bytes, or fails once ctx is done.
-func (l *line) readFull(ctx context.Context, p []byte) error {
+// readFull reads len(p) bytes, or fails once b ends.
+func (l *line) readFull(b bound, p []byte) error {
 	if l.deadlines != nil {
-		stop := watch(ctx, l.deadlines)
+		stop := watch(b, l.deadlines)
 		defer stop()
 		if _, err := io.ReadFull(l.port, p); err != nil {
-			return ioError(ctx, err)
+			return ioError(b, err)
 		}
 		l.busyUntil(time.Now())
 
@@ -152,7 +152,7 @@ func (l *line) readFull(ctx context.Context, p []byte) error {
 			return err
 		}
 		if m == 0 {
-			if err := sleep(ctx, l.poll); err != nil {
+			if err := sleep(b, l.poll); err != nil {
 				return err
 			}
 		}
@@ -165,7 +165,7 @@ func (l *line) readFull(ctx context.Context, p []byte) error {
 // readFrame reads the rest of a frame, which holds its first bytes, and returns it whole, CRC included. length works
 // out the frame's length from its first bytes (responseLength, requestLength), or how many it needs to tell: readFrame
 // reads that many, and asks again, until length returns len(frame).
-func (l *line) readFrame(ctx context.Context, frame []byte, length func(frame []byte) int) ([]byte, error) {
+func (l *line) readFrame(b bound, frame []byte, length func(frame []byte) int) ([]byte, error) {
 	for {
 		n := length(frame)
 		switch {
@@ -182,7 +182,7 @@ func (l *line) readFrame(ctx context.Context, frame []byte, length func(frame []
 		}
 		m := len(frame)
 		frame = append(frame, make([]byte, n-m)...)
-		if err := l.readFull(ctx, frame[m:]); err != nil {
+		if err := l.readFull(b, frame[m:]); err != nil {
 			return frame[:m], err
 		}
 	}
@@ -190,15 +190,15 @@ func (l *line) readFrame(ctx context.Context, frame []byte, length func(frame []
 
 // drain reads until the line has been quiet for long enough that the rest of a broken frame, or a response given up
 // on, has passed, and returns what it read. Else the next read would take it for the start of the next frame. It
-// stops early once ctx is done, or after rtuDrainLimit.
-func (l *line) drain(ctx context.Context) []byte {
+// stops early once b ends, or after rtuDrainLimit.
+func (l *line) drain(b bound) []byte {
 	var (
 		drained []byte
 		buf     [rtuMaxFrame]byte
 		start   = time.Now()
 		last    = start
 	)
-	for ctx.Err() == nil && time.Since(start) < rtuDrainLimit {
+	for b.err() == nil && time.Since(start) < rtuDrainLimit {
 		if l.deadlines != nil {
 			// Each Read fails after quiet without a byte, which ends the drain.
 			_ = l.deadlines.SetReadDeadline(time.Now().Add(l.quiet))
@@ -213,7 +213,7 @@ func (l *line) drain(ctx context.Context) []byte {
 
 			return drained
 		default:
-			if sleep(ctx, l.poll) != nil {
+			if sleep(b, l.poll) != nil {
 				return drained
 			}
 		}
@@ -316,13 +316,9 @@ func (t *RTUTransport) Send(ctx context.Context, unit uint8, request PDU) (PDU, 
 		return PDU{}, err
 	}
 
-	ctx, cancel := t.config.requestContext(ctx)
-	defer cancel()
-
-	select {
-	case t.sem <- struct{}{}:
-	case <-ctx.Done():
-		return PDU{}, ctx.Err()
+	b := newBound(ctx, t.config.timeout)
+	if err := acquire(t.sem, b); err != nil {
+		return PDU{}, err
 	}
 	defer func() { <-t.sem }()
 
@@ -330,10 +326,10 @@ func (t *RTUTransport) Send(ctx context.Context, unit uint8, request PDU) (PDU, 
 		return PDU{}, ErrClosed
 	}
 	if t.dirty {
-		t.line.drain(ctx)
+		t.line.drain(b)
 		t.dirty = false
 	}
-	response, err := t.roundTrip(ctx, unit, request)
+	response, err := t.roundTrip(b, unit, request)
 	if err != nil {
 		t.dirty = true
 
@@ -357,9 +353,9 @@ func (t *RTUTransport) Close() error {
 }
 
 // roundTrip writes request and reads its response.
-func (t *RTUTransport) roundTrip(ctx context.Context, unit uint8, request PDU) (PDU, error) {
+func (t *RTUTransport) roundTrip(b bound, unit uint8, request PDU) (PDU, error) {
 	frame := appendCRC(append([]byte{unit, byte(request.Function)}, request.Data...))
-	if err := t.line.write(ctx, frame); err != nil {
+	if err := t.line.write(b, frame); err != nil {
 		return PDU{}, err
 	}
 	if unit == 0 {
@@ -369,10 +365,10 @@ func (t *RTUTransport) roundTrip(ctx context.Context, unit uint8, request PDU) (
 
 	// 3 bytes, the shortest any response's length can be told from, and shorter than any response.
 	response := make([]byte, 3, rtuMaxFrame)
-	if err := t.line.readFull(ctx, response); err != nil {
+	if err := t.line.readFull(b, response); err != nil {
 		return PDU{}, err
 	}
-	response, err := t.line.readFrame(ctx, response, responseLength)
+	response, err := t.line.readFrame(b, response, responseLength)
 	if errors.Is(err, errBrokenFrame) || errors.Is(err, errUnknownFunction) {
 		return PDU{}, invalidResponse(request.Function, "unexpected frame % X", response)
 	}
@@ -424,11 +420,12 @@ func isWrite(f FunctionCode) bool {
 // package does not define is answered IllegalFunction once the line goes quiet, since its length is unknown.
 func ServeRTU(ctx context.Context, port io.ReadWriter, baudRate int, unit uint8, h Handler) error {
 	l := newLine(port, baudRate)
+	server := newBound(ctx, 0)
 	for {
-		frame, err := readRequest(ctx, l)
+		frame, err := readRequest(server, l)
 		if err != nil {
 			if ctx.Err() == nil && (errors.Is(err, errBrokenFrame) || errors.Is(err, ErrCRC)) {
-				l.drain(ctx)
+				l.drain(server)
 
 				continue
 			}
@@ -444,7 +441,7 @@ func ServeRTU(ctx context.Context, port io.ReadWriter, baudRate int, unit uint8,
 		if address == 0 {
 			continue
 		}
-		if err := l.write(ctx, appendCRC(append([]byte{address, byte(response.Function)}, response.Data...))); err != nil {
+		if err := l.write(server, appendCRC(append([]byte{address, byte(response.Function)}, response.Data...))); err != nil {
 			return stopped(ctx, err)
 		}
 	}
@@ -453,15 +450,14 @@ func ServeRTU(ctx context.Context, port io.ReadWriter, baudRate int, unit uint8,
 // readRequest reads the next request frame on l. It waits as long as it takes for the first byte, then gives the rest
 // frameTimeout: a frame cut short is an errBrokenFrame. A frame for a function requestLength cannot frame ends once
 // the line goes quiet.
-func readRequest(ctx context.Context, l *line) ([]byte, error) {
+func readRequest(server bound, l *line) ([]byte, error) {
 	frame := make([]byte, 1, rtuMaxFrame)
-	if err := l.readFull(ctx, frame); err != nil {
+	if err := l.readFull(server, frame); err != nil {
 		return nil, err
 	}
 
-	frameCtx, cancel := context.WithTimeout(ctx, l.frameTimeout)
-	defer cancel()
-	frame, err := l.readFrame(frameCtx, frame, func(frame []byte) int {
+	rest := newBound(server.ctx, l.frameTimeout)
+	frame, err := l.readFrame(rest, frame, func(frame []byte) int {
 		if len(frame) < 2 {
 			return 2
 		}
@@ -470,29 +466,16 @@ func readRequest(ctx context.Context, l *line) ([]byte, error) {
 	})
 	switch {
 	case errors.Is(err, errUnknownFunction):
-		frame = append(frame, l.drain(ctx)...)
+		frame = append(frame, l.drain(server)...)
 		// The address, the function and the CRC at least, so that the PDU is never shorter than nothing.
 		if len(frame) < 4 || !checkCRC(frame) {
 			return frame, fmt.Errorf("%w: frame % X", ErrCRC, frame)
 		}
 
 		return frame, nil
-	case err != nil && ctx.Err() == nil && frameCtx.Err() != nil:
+	case err != nil && server.err() == nil && rest.err() != nil:
 		return frame, fmt.Errorf("%w: % X cut short", errBrokenFrame, frame)
 	default:
 		return frame, err
-	}
-}
-
-// sleep waits for d, or until ctx is done.
-func sleep(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }

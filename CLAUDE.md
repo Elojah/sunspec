@@ -47,7 +47,8 @@ on integer conversions: bound them, or use the helpers that hold the one `nolint
 
 ## Invariants
 
-- **One request in flight per transport.** `sem`, a 1-token channel, so that waiting for it selects on ctx.
+- **One request in flight per transport.** `sem`, a 1-token channel taken by `acquire`, so that waiting for it selects
+  on ctx.
 - **A TCP connection that failed or timed out is closed, never reused** (`TestTCPTransport_Timeout`): a late or
   half response must not answer the next request. The transaction ID check is for misbehaving devices only.
 - **An RTU request that failed drains the line before the next** (`dirty`, `TestRTUTransport_LateResponse`), until it
@@ -78,6 +79,9 @@ on integer conversions: bound them, or use the helpers that hold the one `nolint
 - **No dependency**, Modbus included: simonvetter/modbus has a stateful unit, no ctx, and logs to stdout.
 - **No retry, no pipelining** in transports: a write may not be safe to repeat, and many devices mix up concurrent
   requests. Retries are the caller's.
+- **A request's timeout is a deadline, not a derived ctx** (`bound`): the port's deadline enforces it, and `acquire`'s
+  and `sleep`'s timers start only once they block. `context.WithTimeout` per request cost a timer and ~200 B, and
+  `watch` skips its AfterFunc for a ctx that is never canceled. `bound.deadline` always includes ctx's own.
 - **FC6 and FC16 are separate calls**: devices disagree on which a single register needs. `Model.Write` uses FC16.
 - **Exceptions at a base or a header are not errors in `Discover`**: they move to the next base, or end the models.
   A transport error returns at once, rather than time out at each base.

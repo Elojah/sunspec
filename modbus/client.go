@@ -44,15 +44,6 @@ func newConfig(options []Option) config {
 	return config
 }
 
-// requestContext returns ctx bounded by the configured timeout.
-func (c config) requestContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	if c.timeout <= 0 {
-		return context.WithCancel(ctx)
-	}
-
-	return context.WithTimeout(ctx, c.timeout)
-}
-
 // Client sends requests through a Transport, with one method per function. It checks a request before sending it,
 // returning a *RequestError, and the response against the request. A server's exception comes back as an
 // *ExceptionError. It is safe for concurrent use, and the Transport sends one request at a time.
