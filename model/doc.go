@@ -12,4 +12,7 @@
 // A model is a group of points, laid out one after the other, then of groups, each repeated as many times as its count
 // says: fixed, held by a point read before, or as many as the rest of the model leaves room for. A point's value may
 // scale with a scale factor: another point, of type sunssf, holding a power of ten.
+//
+// The definitions in models.go are SunSpec's, under the Apache License 2.0, in LICENSE. The rest of the package is
+// under the module's MIT license.
 package model

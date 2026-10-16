@@ -98,6 +98,7 @@ models: ## Vendor SunSpec's model definitions at MODELS_REF, then generate
 	rm -f $(MODELS_DIR)/model_*.json; \
 	cp "$$src"/json/model_*.json $(MODELS_DIR)/; \
 	cp "$$src"/LICENSE $(MODELS_DIR)/LICENSE; \
+	cp "$$src"/LICENSE model/LICENSE; \
 	echo $(MODELS_REF) > $(MODELS_DIR)/REF
 	$Q $(MAKE) --no-print-directory generate
 

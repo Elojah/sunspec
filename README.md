@@ -181,4 +181,4 @@ vendored in `tools/modelgen/json` at the commit `REF` names. `make models` vendo
 
 ## License
 
-MIT, but for the SunSpec model definitions: Apache 2.0.
+MIT, but for the SunSpec model definitions, in `model/models.go`: Apache 2.0, in `model/LICENSE`.

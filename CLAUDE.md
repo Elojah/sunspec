@@ -13,6 +13,7 @@ from the library.
 
 `tools/modelgen` is a module of its own (`replace ../..`), so that the vendored JSON stays out of the library's module.
 It generates `model/models.go`: never edit it, run `make generate`.
+The JSON's LICENSE is out of the module's zip too: `make models` copies it to `model/LICENSE`, for `models.go`.
 
 ## Commands
 
