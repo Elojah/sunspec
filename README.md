@@ -155,10 +155,10 @@ go modbus.Serve(ctx, listener, sim) // or modbus.NewLoopback(sim) in a test
 
 ## TinyGo
 
-The library builds and runs with TinyGo (a dev build until 0.43.0 is out): `make tinygo` runs the tests and the
-examples with it, and builds the examples for a Raspberry Pi Pico. Every SunSpec model is linked, in about 150 KB of
-flash, decoded into RAM only once used: `examples/04-inverter` takes 268 KB of flash and 8 KB of static RAM. An RTU
-port on a microcontroller is its UART, whose `Read` returns at once.
+The library builds and runs with TinyGo 0.43.0 or later: `make tinygo` runs the tests and the examples with it, and
+builds the examples for a Raspberry Pi Pico. Every SunSpec model is linked, in about 150 KB of flash, decoded into RAM
+only once used: `examples/04-inverter` takes 268 KB of flash and 8 KB of static RAM. An RTU port on a microcontroller
+is its UART, whose `Read` returns at once.
 
 ## Examples
 
