@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync"
 )
 
@@ -200,13 +201,45 @@ func (t *TCPTransport) roundTrip(b bound, conn net.Conn, unit uint8, request PDU
 	return response.pdu, nil
 }
 
+// ServeOption configures Serve.
+type ServeOption func(config *serveConfig)
+
+// serveConfig is what ServeOptions set.
+type serveConfig struct {
+	maxConns int
+	overflow Overflow
+}
+
+// Overflow is what Serve does with a connection past WithMaxConnections's limit.
+type Overflow uint8
+
+const (
+	// RefuseNew closes the new connection at once, and keeps serving the others.
+	RefuseNew Overflow = iota
+	// DropOldest closes the oldest connection, to serve the new one.
+	DropOldest
+)
+
+// WithMaxConnections serves at most n connections at once, as many devices do, some only one: past n, overflow says
+// which connection is closed. n <= 0 serves any number, the default.
+func WithMaxConnections(n int, overflow Overflow) ServeOption {
+	return func(config *serveConfig) {
+		config.maxConns, config.overflow = n, overflow
+	}
+}
+
 // Serve serves h over Modbus TCP on l, with a goroutine per connection, which serves its requests one at a time, in
 // order. Pass a listener on port 502 for clients to find it, or on 127.0.0.1:0 in a test.
 //
 // Once ctx is done, it closes l and every connection, waits for their goroutines, and returns nil. If l.Accept fails
 // first, it closes the connections too, then returns that error. A connection sending a frame it cannot parse is
 // closed, since its stream cannot be trusted to resynchronise.
-func Serve(ctx context.Context, l net.Listener, h Handler) error {
+func Serve(ctx context.Context, l net.Listener, h Handler, options ...ServeOption) error {
+	var config serveConfig
+	for _, option := range options {
+		option(&config)
+	}
+
 	// Canceled on return, whatever the reason, which closes l and every connection through their AfterFuncs. The
 	// deferred calls run in reverse: cancel, then wait.
 	connCtx, cancel := context.WithCancel(ctx)
@@ -215,13 +248,64 @@ func Serve(ctx context.Context, l net.Listener, h Handler) error {
 	defer cancel()
 	context.AfterFunc(connCtx, func() { _ = l.Close() })
 
+	served := &conns{config: config}
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			return stopped(ctx, err)
 		}
-		wg.Go(func() { serveConn(connCtx, conn, h) })
+		if !served.add(conn) {
+			_ = conn.Close()
+
+			continue
+		}
+		wg.Go(func() {
+			defer served.remove(conn)
+			serveConn(connCtx, conn, h)
+		})
 	}
+}
+
+// conns are the connections Serve serves, oldest first, kept only with WithMaxConnections.
+type conns struct {
+	config serveConfig
+
+	mu   sync.Mutex
+	list []net.Conn
+}
+
+// add takes conn in, or reports false if Serve must close it. Full, it closes the oldest connection with DropOldest,
+// whose goroutine then ends, and refuses conn otherwise.
+func (c *conns) add(conn net.Conn) bool {
+	if c.config.maxConns <= 0 {
+		return true
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.list) >= c.config.maxConns {
+		if c.config.overflow != DropOldest {
+			return false
+		}
+		_ = c.list[0].Close()
+		c.list = slices.Delete(c.list, 0, 1)
+	}
+	c.list = append(c.list, conn)
+
+	return true
+}
+
+// remove forgets conn, once its goroutine ends. A connection DropOldest closed is gone already.
+func (c *conns) remove(conn net.Conn) {
+	if c.config.maxConns <= 0 {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.list = slices.DeleteFunc(c.list, func(served net.Conn) bool { return served == conn })
 }
 
 // serveConn serves conn's requests until it fails, or ctx is done.
@@ -236,7 +320,11 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 		if err != nil {
 			return
 		}
-		response := mbapFrame{id: request.id, unit: request.unit, pdu: serve(ctx, h, request.unit, request.pdu)}
+		pdu, ok := serve(ctx, h, request.unit, request.pdu)
+		if !ok {
+			continue
+		}
+		response := mbapFrame{id: request.id, unit: request.unit, pdu: pdu}
 		if _, err := conn.Write(appendFrame(make([]byte, 0, mbapHeaderLen+1+len(response.pdu.Data)), response)); err != nil {
 			return
 		}

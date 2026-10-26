@@ -42,9 +42,14 @@ type bound struct {
 // newBound returns the bound of a request on ctx, ending timeout from now at the latest, or with ctx alone for a
 // timeout of 0 or less.
 func newBound(ctx context.Context, timeout time.Duration) bound {
+	return newBoundFrom(ctx, time.Now(), timeout)
+}
+
+// newBoundFrom returns the bound of a request on ctx sent at start, ending timeout after it at the latest.
+func newBoundFrom(ctx context.Context, start time.Time, timeout time.Duration) bound {
 	deadline, _ := ctx.Deadline() // zero, so no deadline, if ctx has none
 	if timeout > 0 {
-		if d := time.Now().Add(timeout); deadline.IsZero() || d.Before(deadline) {
+		if d := start.Add(timeout); deadline.IsZero() || d.Before(deadline) {
 			deadline = d
 		}
 	}
@@ -109,6 +114,17 @@ func sleep(b bound, d time.Duration) error {
 	case <-b.ctx.Done():
 		return b.ctx.Err()
 	}
+}
+
+// wait returns b's error once b ends, which a ctx never done, without a deadline, never does.
+func wait(b bound) error {
+	if b.deadline.IsZero() {
+		<-b.ctx.Done()
+
+		return b.ctx.Err()
+	}
+
+	return sleep(b, time.Until(b.deadline))
 }
 
 // watch makes port's I/O fail once b ends, which Read and Write do not see on their own.

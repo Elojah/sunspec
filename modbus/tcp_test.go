@@ -19,9 +19,9 @@ import (
 	"github.com/elojah/sunspec/modbus"
 )
 
-// serveTCP serves h on a free local port until the test ends, and returns its address. Cleanup checks that Serve
-// returns nil once its ctx is done.
-func serveTCP(tb testing.TB, h modbus.Handler) string {
+// serveTCP serves h with options on a free local port until the test ends, and returns its address. Cleanup checks
+// that Serve returns nil once its ctx is done.
+func serveTCP(tb testing.TB, h modbus.Handler, options ...modbus.ServeOption) string {
 	tb.Helper()
 
 	l, err := new(net.ListenConfig).Listen(tb.Context(), "tcp", "127.0.0.1:0")
@@ -30,7 +30,7 @@ func serveTCP(tb testing.TB, h modbus.Handler) string {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- modbus.Serve(ctx, l, h) }()
+	go func() { served <- modbus.Serve(ctx, l, h, options...) }()
 	tb.Cleanup(func() {
 		cancel()
 		if err := <-served; err != nil {
@@ -344,6 +344,77 @@ func TestServe_ListenerError(t *testing.T) {
 	if err := modbus.Serve(t.Context(), l, newMemory()); !errors.Is(err, net.ErrClosed) {
 		t.Errorf("got %v, want net.ErrClosed", err)
 	}
+}
+
+// A request the Handler answers ErrNoResponse times out, and the next one, on a new connection, is served.
+func TestServe_NoResponse(t *testing.T) {
+	t.Parallel()
+
+	c := modbus.NewClient(modbus.NewTCPTransport(serveTCP(t, silent{Memory: newMemory()}), modbus.WithTimeout(50*time.Millisecond)))
+	t.Cleanup(func() { _ = c.Close() })
+
+	if _, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 1, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v, want context.DeadlineExceeded", err)
+	}
+	if _, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 0, 1); err != nil {
+		t.Errorf("next request: %v", err)
+	}
+}
+
+// Past WithMaxConnections's limit, RefuseNew closes the new connection, and DropOldest the oldest, which its client
+// dials again on its next request after the one that failed.
+func TestServe_MaxConnections(t *testing.T) {
+	t.Parallel()
+
+	read := func(c *modbus.Client) error {
+		_, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 0, 1)
+
+		return err
+	}
+	dial := func(address string) *modbus.Client {
+		c := modbus.NewClient(modbus.NewTCPTransport(address))
+		t.Cleanup(func() { _ = c.Close() })
+
+		return c
+	}
+
+	t.Run("RefuseNew", func(t *testing.T) {
+		t.Parallel()
+
+		address := serveTCP(t, newMemory(), modbus.WithMaxConnections(1, modbus.RefuseNew))
+		first, second := dial(address), dial(address)
+		if err := read(first); err != nil {
+			t.Fatal(err)
+		}
+		if err := read(second); err == nil {
+			t.Error("second connection served, want it refused")
+		}
+		if err := read(first); err != nil {
+			t.Errorf("first connection: %v", err)
+		}
+	})
+
+	t.Run("DropOldest", func(t *testing.T) {
+		t.Parallel()
+
+		address := serveTCP(t, newMemory(), modbus.WithMaxConnections(1, modbus.DropOldest))
+		first, second := dial(address), dial(address)
+		for _, step := range []struct {
+			name   string
+			c      *modbus.Client
+			served bool
+		}{
+			{"first", first, true},
+			{"second, dropping first", second, true},
+			{"first, dropped", first, false},
+			{"first again, dropping second", first, true},
+			{"second, dropped", second, false},
+		} {
+			if err := read(step.c); (err == nil) != step.served {
+				t.Errorf("%s: got %v, want served %t", step.name, err, step.served)
+			}
+		}
+	})
 }
 
 // The same over TCP, on the loopback interface.

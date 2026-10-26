@@ -32,6 +32,10 @@ var (
 
 	// ErrClosed is returned by a Transport's Send after Close.
 	ErrClosed = errors.New("modbus: transport closed")
+
+	// ErrNoResponse is returned by a Handler to answer nothing, as a device that is off, rebooting, or deaf to the
+	// request: Serve, ServeRTU and Loopback send no response, and the client times out.
+	ErrNoResponse = errors.New("modbus: no response")
 )
 
 // ExceptionCode is what a server answers instead of data when it cannot serve a request.

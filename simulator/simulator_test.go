@@ -1,11 +1,13 @@
 package simulator_test
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/elojah/sunspec"
 	"github.com/elojah/sunspec/modbus"
@@ -198,5 +200,95 @@ func TestNew_TooLarge(t *testing.T) {
 
 	if _, err := simulator.New(65500, newModel(t, model.Lookup(1))); !errors.Is(err, simulator.ErrTooLarge) {
 		t.Errorf("got %v, want ErrTooLarge", err)
+	}
+}
+
+// OnWrite's hooks run in order after a write, with the model and the points written, and one failing undoes the write,
+// and what the hooks changed, and answers its error.
+func TestSimulator_OnWrite(t *testing.T) {
+	t.Parallel()
+
+	first, second := newVendor(t), newVendor(t)
+	sim, c := newSimulator(t, first, second)
+	var calls []string
+	sim.OnWrite(func(m *sunspec.Model, written []*sunspec.Point) error {
+		names := make([]string, 0, len(written))
+		for _, p := range written {
+			names = append(names, p.Name())
+		}
+		calls = append(calls, strings.Join(names, ","))
+		if m != first {
+			t.Errorf("hook got model %p, want first's", m)
+		}
+
+		// RO follows Small, as a measurement follows its setting.
+		small, _ := m.Point("Small").Uint()
+
+		return m.Point("RO").SetUint(small * 10)
+	})
+	sim.OnWrite(func(m *sunspec.Model, _ []*sunspec.Point) error {
+		calls = append(calls, "second hook")
+		if small, _ := m.Point("Small").Uint(); small > 100 {
+			return modbus.ErrIllegalDataValue
+		}
+
+		return nil
+	})
+
+	// first's Small at 40004, Big at 40005 and 40006, RO at 40007.
+	if err := c.WriteRegisters(t.Context(), 1, 40004, []uint16{5, 0, 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WriteRegisters(t.Context(), 1, 40004, []uint16{101}); !errors.Is(err, modbus.ErrIllegalDataValue) {
+		t.Errorf("refused write: got %v, want ErrIllegalDataValue", err)
+	}
+	if want := []string{"Small,Big", "second hook", "Small", "second hook"}; !slices.Equal(calls, want) {
+		t.Errorf("calls %q, want %q", calls, want)
+	}
+	got, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 40004, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []uint16{5, 0, 2, 50}; !slices.Equal(got, want) {
+		t.Errorf("first's points = %v, want %v, as before the refused write", got, want)
+	}
+}
+
+// OnRead's hooks run before each read, which answers the first error one returns.
+func TestSimulator_OnRead(t *testing.T) {
+	t.Parallel()
+
+	m := newVendor(t)
+	sim, c := newSimulator(t, m)
+	var (
+		reads int
+		fail  error
+	)
+	sim.OnRead(func() error {
+		reads++
+
+		return m.Point("RO").SetUint(uint64(reads)) //nolint:gosec // a few reads
+	})
+	sim.OnRead(func() error { return fail })
+
+	for want := range uint16(3) {
+		got, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 40007, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0] != want+1 {
+			t.Errorf("read %d: RO = %d, want %d", want, got[0], want+1)
+		}
+	}
+
+	fail = modbus.ErrServerDeviceBusy
+	if _, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 40007, 1); !errors.Is(err, modbus.ErrServerDeviceBusy) {
+		t.Errorf("got %v, want ErrServerDeviceBusy", err)
+	}
+
+	fail = modbus.ErrNoResponse
+	silent := modbus.NewClient(modbus.NewLoopback(sim, modbus.WithTimeout(10*time.Millisecond)))
+	if _, err := silent.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 40007, 1); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("got %v, want context.DeadlineExceeded", err)
 	}
 }

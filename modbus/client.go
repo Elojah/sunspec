@@ -16,7 +16,7 @@ type Transport interface {
 	Close() error
 }
 
-// Option configures a TCPTransport or an RTUTransport.
+// Option configures a TCPTransport, an RTUTransport or a Loopback.
 type Option func(config *config)
 
 // config is what Options set.

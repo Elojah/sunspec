@@ -8,8 +8,9 @@ Commands, fragile invariants and settled decisions. Behaviour is in godoc and th
 
 Packages: `sunspec` (`Discover`, `Device`, `Model`, `Group`, `Point`, `NewModel`, errors), `modbus` (`Client`,
 `Transport`s, `Serve`/`ServeRTU`, `Handler`, `Memory`, errors), `model` (definitions: `Lookup`, `Parse`, binary form),
-`simulator`, `examples/`. Imports go `simulator` → `sunspec` → `modbus`, `model`. `modbus` and `model` import nothing
-from the library.
+`simulator` (`Simulator`, its hooks, `Limit`), `fault` (a `Handler` and a `Transport` failing on demand), `record`
+(`Entry` and its text, `Recorder`, `Replayer`), `examples/`. Imports go `simulator` → `sunspec` → `modbus`, `model`;
+`fault` and `record` → `modbus`. `modbus` and `model` import nothing from the library.
 
 `tools/modelgen` is a module of its own (`replace ../..`), so that the vendored JSON stays out of the library's module.
 It generates `model/models.go`: never edit it, run `make generate`.
@@ -70,7 +71,15 @@ on integer conversions: bound them, or use the helpers that hold the one `nolint
 - **Setters encode into a scratch buffer and copy only on success**, so a refused value changes nothing.
 - **A model from a Device refuses non-writable points, one from NewModel does not**: the simulator sets anything, and
   checks writability itself on Modbus writes, before applying any.
-- **Simulator models change only inside `Update`**, under the lock reads and writes are served under.
+- **Simulator models change only inside `Update`**, under the lock reads and writes are served under, which the hooks
+  run under too. A hook of `OnWrite` failing restores every model from the copy taken before the write
+  (`registers`, `restore`), so a refused write changes nothing, what the hooks changed included.
+- **`ErrNoResponse` is never answered**: `serve` reports it, and `serveConn`, `ServeRTU` write nothing, `Loopback`
+  waits until its timeout (`wait`), measured from the request's start (`newBoundFrom`), and drops a response later
+  than it. It reads the clock twice per request, only with a timeout, and takes a timer only when silent: no
+  allocation, ~100ns in `BenchmarkModelRead`.
+- **A `Replayer`'s log time never goes back** (`advance`), and its state before an entry is the first one's (`apply`ed
+  backwards in `NewReplayer`). Only answered entries set values, only reads' exceptions set codes.
 - **`model.Lookup` decodes from `encoded`, a constant**: a table of literals sat in RAM and overflowed a Pico; one
   function per model took TinyGo over 10 minutes to compile. `reader` returns slices of the constant, so strings stay
   in flash.
@@ -98,9 +107,11 @@ on integer conversions: bound them, or use the helpers that hold the one `nolint
 - RTU and timing tests run in `synctest` bubbles, over a `net.Pipe` (deadlines) and a `uart` (polling): `ports()`
   runs a test over both. TCP tests use real sockets on 127.0.0.1:0 and are `//go:build !tinygo`: TinyGo's net has no
   `ListenConfig.Listen`, and its listeners report port 0.
-- `sunspec` and `simulator` tests talk through `modbus.Loopback`, so they run under TinyGo. `counter` records requests,
-  and fails them on demand.
+- `sunspec`, `simulator`, `fault` and `record` tests talk through `modbus.Loopback`, so they run under TinyGo, and time
+  in `synctest` bubbles: a `Loopback`'s timeout, a fault's delay, a `Limit`'s ramp, a replay. `counter` records
+  requests, and fails them on demand.
 - `model` tests check every generated definition against SunSpec's lengths (`TestDefinitions_Length`) and Parse's
   rules again, and the binary form round trip.
 - Each example has an `Example()` with `// Output:`, and `tinygo-run` diffs `tinygo run`'s output with it. Examples
   reach their simulated device through a Loopback, but 01-registers, which serves TCP and so skips `tinygo-run`.
+  09-replay runs on the real clock: its replay polls 50ms away from what it recorded.

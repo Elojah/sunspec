@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/elojah/sunspec/modbus"
 )
@@ -70,6 +71,33 @@ func (b blocking) ReadRegisters(ctx context.Context, unit uint8, table modbus.Ta
 	}
 
 	return b.Memory.ReadRegisters(ctx, unit, table, address, quantity)
+}
+
+// silent is a Memory answering nothing to the reads and writes of holding register 1, and the reads of register 2 only
+// after delay.
+type silent struct {
+	*modbus.Memory
+
+	delay time.Duration
+}
+
+func (s silent) ReadRegisters(ctx context.Context, unit uint8, table modbus.Table, address, quantity uint16) ([]uint16, error) {
+	switch address {
+	case 1:
+		return nil, modbus.ErrNoResponse
+	case 2:
+		time.Sleep(s.delay)
+	}
+
+	return s.Memory.ReadRegisters(ctx, unit, table, address, quantity)
+}
+
+func (s silent) WriteRegisters(ctx context.Context, unit uint8, address uint16, values []uint16) error {
+	if address == 1 {
+		return modbus.ErrNoResponse
+	}
+
+	return s.Memory.WriteRegisters(ctx, unit, address, values)
 }
 
 // uart is one end of a simulated serial line, whose Read returns at once, with 0 bytes when none came, as TinyGo's

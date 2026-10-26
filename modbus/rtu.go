@@ -416,8 +416,9 @@ func isWrite(f FunctionCode) bool {
 // baudRate is the line's, or 0 for a line without timing.
 //
 // It answers only the requests for unit, since other devices may share the line. It serves broadcasts, unit 0, without
-// answering, and drops a frame whose CRC does not match, as the specification requires. A frame for a function this
-// package does not define is answered IllegalFunction once the line goes quiet, since its length is unknown.
+// answering, as it does a request h answers ErrNoResponse, and drops a frame whose CRC does not match, as the
+// specification requires. A frame for a function this package does not define is answered IllegalFunction once the
+// line goes quiet, since its length is unknown.
 func ServeRTU(ctx context.Context, port io.ReadWriter, baudRate int, unit uint8, h Handler) error {
 	l := newLine(port, baudRate)
 	server := newBound(ctx, 0)
@@ -437,8 +438,8 @@ func ServeRTU(ctx context.Context, port io.ReadWriter, baudRate int, unit uint8,
 		if address != unit && (address != 0 || !isWrite(function)) {
 			continue
 		}
-		response := serve(ctx, h, address, PDU{Function: function, Data: frame[2 : len(frame)-2]})
-		if address == 0 {
+		response, ok := serve(ctx, h, address, PDU{Function: function, Data: frame[2 : len(frame)-2]})
+		if address == 0 || !ok {
 			continue
 		}
 		if err := l.write(server, appendCRC(append([]byte{address, byte(response.Function)}, response.Data...))); err != nil {

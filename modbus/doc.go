@@ -29,7 +29,8 @@
 // # Server
 //
 // Serve and ServeRTU serve a Handler, which Memory implements with tables in memory. They check every request, and
-// answer an exception for one they cannot serve.
+// answer an exception for one they cannot serve, or nothing for one the Handler answers ErrNoResponse, as a device that
+// is off. WithMaxConnections limits Serve to as many connections as a device accepts.
 //
 // # Errors
 //

@@ -199,6 +199,34 @@ func TestRTU_OtherUnit(t *testing.T) {
 	}
 }
 
+// A request the Handler answers ErrNoResponse gets nothing back, and times out, and the next one is served.
+func TestServeRTU_NoResponse(t *testing.T) {
+	t.Parallel()
+
+	for name, newPorts := range ports() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				client, server := newPorts()
+				serveRTU(t, server, silent{Memory: newMemory()})
+				c := modbus.NewClient(modbus.NewRTUTransport(client, baudRate, modbus.WithTimeout(100*time.Millisecond)))
+
+				start := time.Now()
+				if _, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 1, 1); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("got %v, want context.DeadlineExceeded", err)
+				}
+				if waited := time.Since(start); waited != 100*time.Millisecond {
+					t.Errorf("waited %v, want WithTimeout's 100ms", waited)
+				}
+				if _, err := c.ReadRegisters(t.Context(), 1, modbus.HoldingRegisters, 0, 1); err != nil {
+					t.Errorf("next request: %v", err)
+				}
+			})
+		})
+	}
+}
+
 // A request ends at the earlier of its ctx's deadline and WithTimeout's, and one whose ctx is done already is never
 // sent.
 func TestRTUTransport_Deadline(t *testing.T) {

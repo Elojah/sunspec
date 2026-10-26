@@ -10,7 +10,8 @@
 //	w, ok := inverter.Point("W").Float() // scaled by W_SF, ok false if not implemented
 //
 // Package model holds the definitions, package modbus the transport, and package simulator a device in memory, for
-// tests.
+// tests: package fault makes it, or the link to it, fail as in the field, and package record records a real device to
+// replay it.
 //
 // # The register map
 //

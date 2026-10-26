@@ -12,8 +12,8 @@ import (
 //
 // The server checks quantities and ranges before calling it, so a call never asks for more than the protocol allows,
 // nor past address 65535. To answer an exception, return an *ExceptionError or one of the sentinels, such as
-// ErrIllegalDataAddress for an address the device does not have. Any other error answers ServerDeviceFailure, as does
-// a read returning other than quantity values.
+// ErrIllegalDataAddress for an address the device does not have. ErrNoResponse answers nothing at all. Any other error
+// answers ServerDeviceFailure, as does a read returning other than quantity values.
 type Handler interface {
 	// ReadBits returns quantity bits of table, Coils or DiscreteInputs, from address.
 	ReadBits(ctx context.Context, unit uint8, table Table, address, quantity uint16) ([]bool, error)
@@ -32,15 +32,19 @@ type Handler interface {
 // ServerDeviceFailure.
 var errReadLength = errors.New("modbus: handler returned a wrong quantity")
 
-// serve answers request with h: its response, or an exception response. A server answers every request it can frame,
-// so serve has no error of its own.
-func serve(ctx context.Context, h Handler, unit uint8, request PDU) PDU {
+// serve answers request with h: its response, or an exception response, or nothing, false, once h returns
+// ErrNoResponse. A server answers every other request it can frame, so serve has no error of its own.
+func serve(ctx context.Context, h Handler, unit uint8, request PDU) (PDU, bool) {
 	data, err := dispatch(ctx, h, unit, request)
 	if err != nil {
-		return PDU{Function: request.Function | exceptionBit, Data: []byte{byte(exceptionCode(err))}}
+		if errors.Is(err, ErrNoResponse) {
+			return PDU{}, false
+		}
+
+		return PDU{Function: request.Function | exceptionBit, Data: []byte{byte(exceptionCode(err))}}, true
 	}
 
-	return PDU{Function: request.Function, Data: data}
+	return PDU{Function: request.Function, Data: data}, true
 }
 
 // dispatch decodes request, calls h and encodes the data of the response. Its checks follow the order of the

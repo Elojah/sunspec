@@ -12,7 +12,7 @@ BENCH_FLAGS        = -run '^$$' -bench '$(BENCH)' -benchmem
 
 # How long fuzz runs each target, and the targets, as package:name.
 FUZZ_TIME         ?= 30s
-FUZZ_TARGETS       = ./modbus:FuzzServe ./modbus:FuzzClient ./modbus:FuzzServeRTU ./modbus:FuzzServeTCP
+FUZZ_TARGETS       = ./modbus:FuzzServe ./modbus:FuzzClient ./modbus:FuzzServeRTU ./modbus:FuzzServeTCP ./record:FuzzEntry
 
 # The modules tidy, lint and test cover. tools/modelgen is one of its own, so that the JSON it reads stays out of the
 # library's module.
@@ -27,7 +27,7 @@ MODELS_DIR         = tools/modelgen/json
 # tinygo-run skips 01-registers, which serves TCP on 127.0.0.1:0: TinyGo's listeners report port 0, not the one taken.
 TINYGO             = tinygo
 TINYGO_TARGET     ?= pico
-TINYGO_PACKAGES    = . ./modbus ./model ./simulator
+TINYGO_PACKAGES    = . ./modbus ./model ./simulator ./fault ./record
 EXAMPLES           = $(patsubst %/,%,$(wildcard examples/*/))
 TINYGO_RUN         = $(filter-out examples/01-registers,$(EXAMPLES))
 # Prints the lines under // Output: in an example's main_test.go, without their //.

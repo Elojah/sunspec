@@ -22,9 +22,10 @@ specification in its test, and a performance change with `benchstat` against `ma
 - [ ] Function 0x2B/0x0E, Read Device Identification: `Client.ReadDeviceIdentification`, and its frame lengths in
   `responseLength`, so that RTU carries it.
 - [ ] Modbus ASCII: a third framing, `NewASCIITransport`, with its LRC. Rare on SunSpec devices, common on old meters.
-- [ ] Simulator write hooks: `Simulator.OnWrite(func(m *sunspec.Model) error)`, called under the lock after a client's
-  write, so that a simulated inverter reacts to its controls, such as applying `WMaxLimPct` to `W`. A method, not an
-  option of `New`, whose variadic holds the models.
+- [ ] `simulator.Limit`'s `WMaxLimPct_WinTms`: apply a change at a random time within the window, from a source of
+  randomness the caller gives, so that tests stay deterministic.
+- [ ] Model 123's other controls, as `Limit` does the power limit: `Conn` (connect, disconnect), `OutPFSet` (power
+  factor), `VArPct` (reactive power).
 - [ ] Typed accessors for the most common models, generated: `model103.W(m)`, without losing the dynamic access by
   name. First measure what it costs in flash on a Pico.
 

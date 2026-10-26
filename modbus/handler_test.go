@@ -5,6 +5,8 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/elojah/sunspec/modbus"
 )
@@ -189,5 +191,66 @@ func TestLoopback_ContextDone(t *testing.T) {
 	c := modbus.NewClient(modbus.NewLoopback(newMemory()))
 	if _, err := c.ReadRegisters(ctx, 1, modbus.HoldingRegisters, 0, 1); !errors.Is(err, context.Canceled) {
 		t.Errorf("got %v, want context.Canceled", err)
+	}
+}
+
+// A Loopback times out as a wire does: a request the Handler answers ErrNoResponse, the write of a
+// ReadWriteMultipleRegisters included, fails at the earlier of WithTimeout's timeout, 1s by default, and its ctx's
+// deadline, or once its ctx is canceled; and a response later than the timeout is dropped once it comes.
+func TestLoopback_NoResponse(t *testing.T) {
+	t.Parallel()
+
+	short := []modbus.Option{modbus.WithTimeout(100 * time.Millisecond)}
+	tests := []struct {
+		name      string
+		options   []modbus.Option
+		deadline  time.Duration // the ctx's, 0 for none
+		cancel    time.Duration // when the ctx is canceled, 0 for never
+		address   uint16
+		readWrite bool
+		want      time.Duration
+		wantErr   error
+	}{
+		{name: "default timeout", address: 1, want: time.Second, wantErr: context.DeadlineExceeded},
+		{name: "WithTimeout", options: short, address: 1, want: 100 * time.Millisecond, wantErr: context.DeadlineExceeded},
+		{name: "ctx's deadline first", deadline: 30 * time.Millisecond, address: 1, want: 30 * time.Millisecond, wantErr: context.DeadlineExceeded},
+		{name: "canceled", options: []modbus.Option{modbus.WithTimeout(0)}, cancel: 20 * time.Millisecond, address: 1, want: 20 * time.Millisecond, wantErr: context.Canceled},
+		{name: "silent write", options: short, address: 1, readWrite: true, want: 100 * time.Millisecond, wantErr: context.DeadlineExceeded},
+		{name: "late response", options: short, address: 2, want: 300 * time.Millisecond, wantErr: context.DeadlineExceeded},
+		{name: "in time", options: []modbus.Option{modbus.WithTimeout(time.Second)}, address: 2, want: 300 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			synctest.Test(t, func(t *testing.T) {
+				c := modbus.NewClient(modbus.NewLoopback(silent{Memory: newMemory(), delay: 300 * time.Millisecond}, tt.options...))
+				ctx := t.Context()
+				if tt.deadline > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, tt.deadline)
+					defer cancel()
+				}
+				if tt.cancel > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithCancel(ctx)
+					time.AfterFunc(tt.cancel, cancel)
+				}
+
+				start := time.Now()
+				var err error
+				if tt.readWrite {
+					_, err = c.ReadWriteRegisters(ctx, 1, 0, 1, tt.address, []uint16{42})
+				} else {
+					_, err = c.ReadRegisters(ctx, 1, modbus.HoldingRegisters, tt.address, 1)
+				}
+				if !errors.Is(err, tt.wantErr) {
+					t.Errorf("got %v, want %v", err, tt.wantErr)
+				}
+				if waited := time.Since(start); waited != tt.want {
+					t.Errorf("waited %v, want %v", waited, tt.want)
+				}
+			})
+		})
 	}
 }
