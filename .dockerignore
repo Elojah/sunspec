@@ -1,0 +1,6 @@
+# Only cmd/simulator/Dockerfile builds from here: the library, without the JSON tools/modelgen reads.
+.git/
+.bench/
+.github/
+bin/
+tools/

@@ -8,7 +8,8 @@ Read and write SunSpec devices from Go, such as inverters, meters and batteries,
 - **Modbus**: client and server, over TCP, RTU on a serial line, and RTU over TCP, with `context` everywhere.
 - **SunSpec**: discovers a device's models, and decodes its points by name, with their scale factors, types and
   repeating groups, from every model SunSpec publishes, or a vendor's.
-- **Simulator**: a SunSpec device in memory, to test against without hardware.
+- **Simulator**: a SunSpec device in memory, to test against without hardware, and `cmd/simulator`, an inverter served
+  over Modbus TCP.
 - **TinyGo**: runs on a microcontroller, RTU and SunSpec included. Every model fits a Raspberry Pi Pico.
 - No dependency: the standard library only.
 
@@ -161,6 +162,23 @@ limit, err := simulator.NewLimit(controls, inverter, 5000, func(now time.Time) f
 sim.OnWrite(limit.Write)
 sim.OnRead(limit.Read)
 ```
+
+`cmd/simulator` serves a three-phase inverter over Modbus TCP, for a client in another process, or another language:
+the common model (1) and model 103 from 40000, to any unit. Its output follows a sun rising at 06:00 UTC and setting at
+18:00 UTC, of a day lasting `-day`: W peaks at `-w-max` at noon, A follows it, WH sums it, St is `MPPT` by day and
+`SLEEPING` by night.
+
+```sh
+go run github.com/elojah/sunspec/cmd/simulator@latest -address :1502 -day 10m  # a day every 10 minutes
+docker build -t sunspec-simulator -f cmd/simulator/Dockerfile https://github.com/Elojah/sunspec.git#v1.2.0
+docker run -p 502:502 sunspec-simulator -day 10m
+```
+
+| Flag | Default | Is |
+| --- | --- | --- |
+| `-address` | `:502` | The host and port to listen on. |
+| `-w-max` | `5000` | The output at noon, in watts, up to 32767. |
+| `-day` | `24h` | How long a day lasts. |
 
 ## Faults
 

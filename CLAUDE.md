@@ -9,8 +9,10 @@ Commands, fragile invariants and settled decisions. Behaviour is in godoc and th
 Packages: `sunspec` (`Discover`, `Device`, `Model`, `Group`, `Point`, `NewModel`, errors), `modbus` (`Client`,
 `Transport`s, `Serve`/`ServeRTU`, `Handler`, `Memory`, errors), `model` (definitions: `Lookup`, `Parse`, binary form),
 `simulator` (`Simulator`, its hooks, `Limit`), `fault` (a `Handler` and a `Transport` failing on demand), `record`
-(`Entry` and its text, `Recorder`, `Replayer`), `examples/`. Imports go `simulator` → `sunspec` → `modbus`, `model`;
-`fault` and `record` → `modbus`. `modbus` and `model` import nothing from the library.
+(`Entry` and its text, `Recorder`, `Replayer`), `examples/`, and `cmd/simulator`, a binary serving an inverter over
+TCP, standard library only (`flag`, `log/slog`), with its `Dockerfile` built from the root (`.dockerignore`). Imports
+go `simulator` → `sunspec` → `modbus`, `model`; `fault` and `record` → `modbus`. `modbus` and `model` import nothing
+from the library.
 
 `tools/modelgen` is a module of its own (`replace ../..`), so that the vendored JSON stays out of the library's module.
 It generates `model/models.go`: never edit it, run `make generate`.
@@ -28,6 +30,7 @@ make fuzz                           # each fuzz target for FUZZ_TIME (30s)
 make bench                          # BENCH=regexp
 make benchcmp                       # main (BENCH_BASE) vs the working tree, with benchstat
 make tinygo                         # tinygo-test, tinygo-run (examples, output checked), tinygo-build (Pico)
+go run ./cmd/simulator -address :1502 -day 10m  # an inverter on Modbus TCP, a day every 10 minutes
 ```
 
 Lint (`.golangci.yml`) is `default: all` minus a disable list, tests included. Mind `nlreturn`, `paralleltest`
